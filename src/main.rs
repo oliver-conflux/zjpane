@@ -26,6 +26,8 @@ struct State {
     mode: Mode,
     // For deferred pipe output (list command)
     pending_list_pipe_id: Option<String>,
+    // For deferred read output
+    pending_read_request: Option<(String, u32, bool)>, // (pipe_id, pane_id, get_full)
 }
 
 register_plugin!(State);
@@ -183,7 +185,7 @@ impl State {
                         self.position = 0;
                         hide_self();
 
-                        focus_terminal_pane(pane.id, false);
+                        focus_terminal_pane(pane.id, false, false);
                     }
                 }
                 _ => (),
@@ -228,20 +230,20 @@ impl State {
             "focus_at" => {
                 if let Ok(Some(pane)) = payload.parse::<usize>().map(|index| self.panes.get(index))
                 {
-                    focus_terminal_pane(pane.id, false);
+                    focus_terminal_pane(pane.id, false, false);
                 }
             }
             "focus_id" => {
                 if let Ok(pane_id) = payload.parse::<u32>() {
                     if let Some(pane) = self.panes.iter().find(|p| p.id == pane_id) {
-                        focus_terminal_pane(pane.id, false);
+                        focus_terminal_pane(pane.id, false, false);
                     }
                 }
             }
             "focus" => {
                 let pane = self.panes.iter_mut().find(|pane| pane.title.eq(payload));
                 if let Some(pane) = pane {
-                    focus_terminal_pane(pane.id, false);
+                    focus_terminal_pane(pane.id, false, false);
                 }
             }
             "execute_at" => {
@@ -269,6 +271,166 @@ impl State {
                         None,
                         BTreeMap::new(),
                     );
+                }
+            }
+            "spawn" => {
+                // Format: zjpane::spawn::NAME[::DIRECTION]
+                // Creates a new named tiled pane with optional direction
+                // DIRECTION: up, down, left, right (optional)
+                if parts.len() >= 3 {
+                    let pane_name = parts[2].to_string();
+
+                    let direction = if parts.len() > 3 {
+                        match parts[3].to_lowercase().as_str() {
+                            "up" => Some(Direction::Up),
+                            "down" => Some(Direction::Down),
+                            "left" => Some(Direction::Left),
+                            "right" => Some(Direction::Right),
+                            _ => None,
+                        }
+                    } else {
+                        None
+                    };
+
+                    // Get default shell from $SHELL, fallback to /bin/sh
+                    let shell_path = std::env::var("SHELL")
+                        .unwrap_or_else(|_| "/bin/sh".to_string());
+
+                    // Explicitly spawn the shell with use_terminal_title=false
+                    // so our pane_name takes precedence over shell's title
+                    let shell_command = actions::RunCommandAction {
+                        command: std::path::PathBuf::from(shell_path),
+                        args: vec![],
+                        cwd: None,
+                        direction,
+                        hold_on_close: false,
+                        hold_on_start: false,
+                        originating_plugin: None,
+                        use_terminal_title: false,
+                    };
+
+                    let action = actions::Action::NewTiledPane {
+                        direction,
+                        command: Some(shell_command),
+                        pane_name: Some(pane_name),
+                        borderless: None,
+                        near_current_pane: false,
+                    };
+                    run_action(action, BTreeMap::new());
+                }
+            }
+            "write" => {
+                // Format: zjpane::write::NAME::TEXT
+                // Writes TEXT + carriage return to the pane with matching title
+                if parts.len() >= 4 {
+                    let pane_name = parts[2];
+                    let text = format!("{}\r", parts[3..].join("::"));
+                    if let Some(pane) = self.panes.iter().find(|p| p.title.eq(pane_name)) {
+                        write_chars_to_pane_id(&text, PaneId::Terminal(pane.id));
+                    }
+                }
+            }
+            "write_id" => {
+                // Format: zjpane::write_id::ID::TEXT
+                // Writes TEXT + carriage return to the pane with matching numeric ID
+                if parts.len() >= 4 {
+                    if let Ok(pane_id) = parts[2].parse::<u32>() {
+                        let text = format!("{}\r", parts[3..].join("::"));
+                        if self.panes.iter().any(|p| p.id == pane_id) {
+                            write_chars_to_pane_id(&text, PaneId::Terminal(pane_id));
+                        }
+                    }
+                }
+            }
+            "write_raw" => {
+                // Format: zjpane::write_raw::NAME::TEXT
+                // Writes TEXT WITHOUT carriage return (for multi-step input)
+                if parts.len() >= 4 {
+                    let pane_name = parts[2];
+                    let text = parts[3..].join("::");
+                    if let Some(pane) = self.panes.iter().find(|p| p.title.eq(pane_name)) {
+                        write_chars_to_pane_id(&text, PaneId::Terminal(pane.id));
+                    }
+                }
+            }
+            "write_raw_id" => {
+                // Format: zjpane::write_raw_id::ID::TEXT
+                // Writes TEXT WITHOUT carriage return to pane by ID
+                if parts.len() >= 4 {
+                    if let Ok(pane_id) = parts[2].parse::<u32>() {
+                        let text = parts[3..].join("::");
+                        if self.panes.iter().any(|p| p.id == pane_id) {
+                            write_chars_to_pane_id(&text, PaneId::Terminal(pane_id));
+                        }
+                    }
+                }
+            }
+            "send_enter" => {
+                // Format: zjpane::send_enter::NAME
+                // Sends carriage return to the pane with matching title
+                if parts.len() >= 3 {
+                    let pane_name = parts[2];
+                    if let Some(pane) = self.panes.iter().find(|p| p.title.eq(pane_name)) {
+                        write_chars_to_pane_id("\r", PaneId::Terminal(pane.id));
+                    }
+                }
+            }
+            "send_enter_id" => {
+                // Format: zjpane::send_enter_id::ID
+                // Sends carriage return to the pane with matching numeric ID
+                if parts.len() >= 3 {
+                    if let Ok(pane_id) = parts[2].parse::<u32>() {
+                        if self.panes.iter().any(|p| p.id == pane_id) {
+                            write_chars_to_pane_id("\r", PaneId::Terminal(pane_id));
+                        }
+                    }
+                }
+            }
+            "close" => {
+                // Format: zjpane::close::NAME
+                // Closes the pane with matching title
+                if parts.len() >= 3 {
+                    let pane_name = parts[2];
+                    if let Some(pane) = self.panes.iter().find(|p| p.title.eq(pane_name)) {
+                        close_terminal_pane(pane.id);
+                    }
+                }
+            }
+            "close_id" => {
+                // Format: zjpane::close_id::ID
+                // Closes the pane with matching numeric ID
+                if parts.len() >= 3 {
+                    if let Ok(pane_id) = parts[2].parse::<u32>() {
+                        if self.panes.iter().any(|p| p.id == pane_id) {
+                            close_terminal_pane(pane_id);
+                        }
+                    }
+                }
+            }
+            "read" => {
+                // Format: zjpane::read::NAME[::full]
+                // Reads pane scrollback by name and returns via CLI pipe
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    if let Some(pane) = self.panes.iter().find(|p| p.title.eq(payload)) {
+                        let get_full = parts.len() > 3 && parts[3] == "full";
+                        block_cli_pipe_input(pipe_id);
+                        self.pending_read_request = Some((pipe_id.clone(), pane.id, get_full));
+                        set_timeout(0.1);
+                    }
+                }
+            }
+            "read_id" => {
+                // Format: zjpane::read_id::ID[::full]
+                // Reads pane scrollback by ID and returns via CLI pipe
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    if let Ok(pane_id) = payload.parse::<u32>() {
+                        if self.panes.iter().any(|p| p.id == pane_id) {
+                            let get_full = parts.len() > 3 && parts[3] == "full";
+                            block_cli_pipe_input(pipe_id);
+                            self.pending_read_request = Some((pipe_id.clone(), pane_id, get_full));
+                            set_timeout(0.1);
+                        }
+                    }
                 }
             }
             _ => (),
@@ -308,6 +470,9 @@ impl ZellijPlugin for State {
             PermissionType::OpenTerminalsOrPlugins,
             PermissionType::RunCommands,
             PermissionType::ReadCliPipes,
+            PermissionType::RunActionsAsUser,
+            PermissionType::WriteToStdin,
+            PermissionType::ReadPaneContents,
         ]);
 
         subscribe(&[
@@ -340,6 +505,28 @@ impl ZellijPlugin for State {
                 }).collect();
                 let output = format!("[{}]", panes_json.join(","));
                 cli_pipe_output(&pipe_id, &output);
+                unblock_cli_pipe_input(&pipe_id);
+            }
+
+            // Handle deferred read output
+            if let Some((pipe_id, pane_id, get_full)) = self.pending_read_request.take() {
+                match get_pane_scrollback(PaneId::Terminal(pane_id), get_full) {
+                    Ok(contents) => {
+                        let mut all_lines = Vec::new();
+                        if get_full {
+                            all_lines.extend(contents.lines_above_viewport);
+                        }
+                        all_lines.extend(contents.viewport);
+                        if get_full {
+                            all_lines.extend(contents.lines_below_viewport);
+                        }
+                        let output = all_lines.join("\n");
+                        cli_pipe_output(&pipe_id, &output);
+                    }
+                    Err(e) => {
+                        cli_pipe_output(&pipe_id, &format!("ERROR: {}", e));
+                    }
+                }
                 unblock_cli_pipe_input(&pipe_id);
             }
         }

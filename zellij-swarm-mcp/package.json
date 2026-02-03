@@ -1,0 +1,21 @@
+{
+  "name": "zellij-swarm-mcp",
+  "version": "1.0.0",
+  "description": "MCP server for managing zellij panes via zjpane plugin",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsc --watch"
+  },
+  "keywords": ["mcp", "zellij", "terminal", "agents"],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "typescript": "^5.0.0"
+  }
+}

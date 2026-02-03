@@ -7,14 +7,21 @@ Enable Claude Code to manage zellij panes programmatically:
 3. Focus specific panes by name/ID
 4. Send commands to specific panes
 
-## Current Status (Session 4)
-**All core features working!**
+## Current Status (Session 7)
+**All core features working including pane read!**
 
 ## What Works
 - `zellij pipe "zjpane::list"` - returns JSON array of panes with id and title
 - `zellij pipe "zjpane::focus_at::INDEX"` - focuses pane by index in zjpane's list
 - `zellij pipe "zjpane::focus_id::ID"` - focuses pane by numeric ID
 - `zellij pipe "zjpane::focus::PANE_NAME"` - focuses pane by title
+- `zellij pipe "zjpane::spawn::NAME[::DIRECTION]"` - creates named tiled pane (direction: up/down/left/right)
+- `zellij pipe "zjpane::write::NAME::TEXT"` - writes text to pane by title
+- `zellij pipe "zjpane::write_id::ID::TEXT"` - writes text to pane by numeric ID
+- `zellij pipe "zjpane::read::NAME[::full]"` - reads pane scrollback by title (viewport or full)
+- `zellij pipe "zjpane::read_id::ID[::full]"` - reads pane scrollback by ID (viewport or full)
+- `zellij pipe "zjpane::close::NAME"` - closes pane by title
+- `zellij pipe "zjpane::close_id::ID"` - closes pane by numeric ID
 - `zellij action launch-or-focus-plugin "file:~/.config/zellij/plugins/zjpane.wasm" --floating` - launches zjpane via CLI
 
 ### Example Workflow
@@ -171,6 +178,36 @@ Traced through zellij source code in `~/repos/zellij`:
 ### Why Original Plugin Didn't Need It
 The original zjpane was one-way only - it received commands and took actions (focus pane, etc.) but never sent data back to CLI. So it never needed `ReadCliPipes`.
 
+## Session 5: Built Zellij from Source for Read Pane API
+
+### Why This Was Necessary
+The `get_pane_scrollback(pane_id, get_full)` API needed for reading pane contents is not available in any official Zellij release (as of February 2025). It only exists on the main branch.
+
+### What We Did
+Built Zellij from the main branch to get access to the new plugin APIs:
+```bash
+cd ~/repos/zellij
+git pull origin main
+cargo build --release
+# Use the built binary instead of system zellij
+```
+
+### New APIs Now Available
+With the main branch build, we now have access to:
+```rust
+// Read pane contents directly - THE KEY API FOR AGENT SWARMING
+get_pane_scrollback(pane_id: PaneId, get_full: bool) -> Result<PaneContents, String>
+```
+
+This eliminates the need for the workaround (focus → dump-screen → read file) and enables true bi-directional communication between agents.
+
+### Next Steps
+- Update zellij-tile dependency to match main branch (or use git dependency)
+- Add `zjpane::read::ID` command using `get_pane_scrollback`
+- Add `zjpane::write::ID::TEXT` command using `write_chars_to_pane_id`
+
+---
+
 ## Future: Claude Code Agent Swarming
 
 ### The Vision
@@ -240,10 +277,244 @@ read_output(pane_name)               → gets captured output
 ```
 
 ### Next Steps
-1. Add `zjpane::write::ID::TEXT` command using `write_chars_to_pane_id`
-2. For reading: workaround (focus → dump-screen → read file) OR upgrade zellij
-3. Build MCP server (`zellij-swarm-mcp`) that orchestrates everything
-4. Decide later: continue with plugin or fork zellij for cleaner CLI
+1. ~~Add `zjpane::write::ID::TEXT` command using `write_chars_to_pane_id`~~ ✓ Done
+2. ~~Add `zjpane::read::ID` command using `get_pane_scrollback`~~ ✓ Done (Session 7)
+3. ~~Add `zjpane::close` commands~~ ✓ Done (Session 6)
+4. ~~Plan MCP server~~ ✓ Done (Session 8)
+5. **BUILD MCP SERVER** - See Session 8 for full plan
+
+## Session 6: Added Close Commands
+
+### What We Added
+- `zjpane::close::NAME` - closes pane by title
+- `zjpane::close_id::ID` - closes pane by numeric ID
+
+Uses `close_terminal_pane(pane_id)` from zellij-tile.
+
+### Agent Swarming Demo
+Successfully demonstrated multi-agent coordination:
+1. `zjpane::spawn::planner::right` - created a new pane
+2. `zjpane::write::planner::claude "task..."` - sent Claude to work in that pane
+3. `zjpane::list` - enumerated all panes
+
+The infrastructure for agent swarming is now functional - spawn, write, close, list, focus all working.
+
+## Session 7: Added Read Commands
+
+### What We Added
+- `zjpane::read::NAME[::full]` - reads pane scrollback by title
+- `zjpane::read_id::ID[::full]` - reads pane scrollback by numeric ID
+
+Uses `get_pane_scrollback(PaneId, get_full)` from zellij-tile main branch.
+
+### Implementation Details
+- Added `PermissionType::ReadPaneContents` permission
+- Uses deferred output pattern (like `list`) with timer event
+- `::full` suffix returns entire scrollback; without it returns viewport only
+- Returns `PaneContents.viewport` (and `lines_above/below_viewport` when full)
+
+### API Notes
+- `get_pane_scrollback` is synchronous, blocks up to 5 seconds
+- Requires zellij built from main branch (not in 0.43.x releases)
+
+## Session 9: Added write_raw and send_enter commands
+
+### Problem
+When sending text to Claude Code's interactive input, the text appears but doesn't submit. The issue is that Claude Code's TUI needs a delay between receiving text and receiving Enter.
+
+### Solution (from tmux workaround research)
+The tmux community uses this pattern:
+```bash
+tmux send-keys -t "$target" "$message" && sleep 0.1 && tmux send-keys -t "$target" Enter
+```
+
+We added new commands to support this pattern:
+- `zjpane::write_raw::NAME::TEXT` - writes text WITHOUT carriage return
+- `zjpane::write_raw_id::ID::TEXT` - same but by pane ID
+- `zjpane::send_enter::NAME` - sends just carriage return
+- `zjpane::send_enter_id::ID` - same but by pane ID
+
+### Changes Made
+1. **src/main.rs** - Added 4 new commands (write_raw, write_raw_id, send_enter, send_enter_id)
+2. **zellij-swarm-mcp/src/zjpane.ts** - Added wrapper functions
+3. **zellij-swarm-mcp/src/index.ts** - Added `send_enter` tool and `send_enter` param to `write_to_pane`
+
+### Build Status
+- Plugin built: `cargo build --release` ✓
+- Plugin installed: `cp target/wasm32-wasip1/release/zjpane.wasm ~/.config/zellij/plugins/` ✓
+- MCP server built: `cd zellij-swarm-mcp && npm run build` ✓
+
+### To Test (after zellij restart)
+1. Restart zellij session to reload plugin
+2. Restart MCP server (or restart Claude Code)
+3. Test the new pattern:
+   ```
+   spawn_pane("test-claude")
+   write_to_pane("test-claude", "claude", send_enter=true)  # start claude
+   # wait for claude to load
+   write_to_pane("test-claude", "Hello!", send_enter=false)  # type message
+   # wait 100ms
+   send_enter("test-claude")  # submit
+   ```
+
+### Sources
+- [claude-commander](https://github.com/sstraus/claude-commander) - socket-based approach
+- [GitHub Issue #2929](https://github.com/anthropics/claude-code/issues/2929) - tmux workaround
+
+---
+
+## Session 8: MCP Server Planning
+
+### Goal
+Build `zellij-swarm-mcp` - an MCP server that exposes zjpane commands as tools for Claude Code agents.
+
+### Why MCP?
+- Claude Code natively supports MCP servers
+- Tools are discoverable and self-documenting
+- Structured input/output (JSON schemas)
+- No need to remember pipe command syntax
+
+### Proposed Tools
+
+```typescript
+// Core pane operations
+list_panes() → { panes: [{id: number, title: string}] }
+spawn_pane(name: string, direction?: "up"|"down"|"left"|"right") → { success: boolean }
+write_to_pane(name: string, text: string) → { success: boolean }
+read_pane(name: string, full?: boolean) → { content: string }
+close_pane(name: string) → { success: boolean }
+
+// Convenience: spawn + start claude in one call
+spawn_agent(name: string, task: string, direction?: string) → { success: boolean }
+```
+
+### Implementation Plan
+
+**Language:** TypeScript with `@modelcontextprotocol/sdk`
+- Well-documented, standard MCP approach
+- Easy JSON handling
+- Good subprocess support via Node
+
+**Directory Structure:**
+```
+zellij-swarm-mcp/
+├── package.json
+├── tsconfig.json
+├── src/
+│   ├── index.ts          # MCP server entry point
+│   ├── tools.ts          # Tool definitions
+│   └── zjpane.ts         # Wrapper for zellij pipe commands
+└── README.md
+```
+
+**Core Implementation (src/zjpane.ts):**
+```typescript
+import { execSync } from 'child_process';
+
+export function zjpaneCommand(cmd: string): string {
+  return execSync(`zellij pipe "zjpane::${cmd}"`, { encoding: 'utf-8' });
+}
+
+export function listPanes(): {id: number, title: string}[] {
+  const output = zjpaneCommand('list');
+  return JSON.parse(output);
+}
+
+export function spawnPane(name: string, direction?: string): void {
+  const cmd = direction ? `spawn::${name}::${direction}` : `spawn::${name}`;
+  zjpaneCommand(cmd);
+}
+
+export function writeToPane(name: string, text: string): void {
+  // Escape :: in text to avoid command injection
+  const safeText = text.replace(/::/g, ':\\:');
+  zjpaneCommand(`write::${name}::${safeText}`);
+}
+
+export function readPane(name: string, full = false): string {
+  const cmd = full ? `read::${name}::full` : `read::${name}`;
+  return zjpaneCommand(cmd);
+}
+
+export function closePane(name: string): void {
+  zjpaneCommand(`close::${name}`);
+}
+```
+
+**MCP Server (src/index.ts):**
+```typescript
+import { Server } from '@modelcontextprotocol/sdk/server/index.js';
+import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import * as zjpane from './zjpane.js';
+
+const server = new Server({ name: 'zellij-swarm', version: '1.0.0' }, {
+  capabilities: { tools: {} }
+});
+
+server.setRequestHandler('tools/list', async () => ({
+  tools: [
+    { name: 'list_panes', description: 'List all terminal panes', inputSchema: { type: 'object', properties: {} } },
+    { name: 'spawn_pane', description: 'Create a new named pane', inputSchema: { ... } },
+    { name: 'write_to_pane', description: 'Send text to a pane', inputSchema: { ... } },
+    { name: 'read_pane', description: 'Read pane contents', inputSchema: { ... } },
+    { name: 'close_pane', description: 'Close a pane', inputSchema: { ... } },
+    { name: 'spawn_agent', description: 'Spawn a Claude agent with a task', inputSchema: { ... } },
+  ]
+}));
+
+server.setRequestHandler('tools/call', async (request) => {
+  switch (request.params.name) {
+    case 'list_panes':
+      return { content: [{ type: 'text', text: JSON.stringify(zjpane.listPanes()) }] };
+    case 'spawn_pane':
+      zjpane.spawnPane(request.params.arguments.name, request.params.arguments.direction);
+      return { content: [{ type: 'text', text: 'Pane spawned' }] };
+    // ... etc
+  }
+});
+
+const transport = new StdioServerTransport();
+await server.connect(transport);
+```
+
+### Configuration
+
+**Claude Code MCP config (~/.claude/mcp.json or project .mcp.json):**
+```json
+{
+  "mcpServers": {
+    "zellij-swarm": {
+      "command": "node",
+      "args": ["/path/to/zellij-swarm-mcp/dist/index.js"]
+    }
+  }
+}
+```
+
+### Prerequisites
+- zjpane plugin must be loaded in zellij session
+- MCP server runs inside the zellij session (so `zellij pipe` works)
+- Node.js installed
+
+### Edge Cases to Handle
+1. **zjpane not loaded** - detect and return helpful error
+2. **Pane doesn't exist** - handle gracefully in read/write/close
+3. **Command escaping** - `::` in text could break parsing (need escape mechanism)
+4. **Timeout** - `read` with full scrollback on huge output could be slow
+
+### Future Enhancements
+- `wait_for_pattern(pane, regex, timeout)` - wait until output matches
+- `send_message(from, to, msg)` - higher-level agent messaging (stateful)
+- `get_agent_status(name)` - parse pane for completion indicators
+- Resource exposure: list panes as MCP resources for context
+
+### Next Steps
+1. Create `zellij-swarm-mcp/` directory
+2. Initialize npm project with TypeScript
+3. Implement zjpane.ts wrapper
+4. Implement MCP server with tool handlers
+5. Test with Claude Code
+6. Document usage in README
 
 ## Useful References
 - zellij plugin pipes: https://zellij.dev/documentation/plugin-pipes
@@ -251,3 +522,5 @@ read_output(pane_name)               → gets captured output
 - PipeMessage struct: https://docs.rs/zellij-tile/latest/zellij_tile/prelude/struct.PaneContents.html
 - zellij source (cloned): ~/repos/zellij
 - zjstatus plugin (pipe examples): https://github.com/dj95/zjstatus
+- MCP TypeScript SDK: https://github.com/modelcontextprotocol/typescript-sdk
+- MCP Server Examples: https://github.com/modelcontextprotocol/servers

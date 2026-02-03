@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "zellij-swarm": {
+      "command": "node",
+      "args": ["/home/osmcgraw/repos/zjpane/zellij-swarm-mcp/dist/index.js"]
+    }
+  }
+}
