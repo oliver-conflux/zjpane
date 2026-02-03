@@ -171,8 +171,83 @@ Traced through zellij source code in `~/repos/zellij`:
 ### Why Original Plugin Didn't Need It
 The original zjpane was one-way only - it received commands and took actions (focus pane, etc.) but never sent data back to CLI. So it never needed `ReadCliPipes`.
 
+## Future: Claude Code Agent Swarming
+
+### The Vision
+Enable Claude Code instances to work together across zellij panes:
+- Agents can send messages to each other ("report back to Bob when done")
+- Run subprocesses in visible panes (human can watch AND Claude gets output)
+- True multi-agent orchestration from an MCP server
+
+### Discovered Zellij APIs (zellij-tile 0.43.1)
+
+**Available NOW:**
+```rust
+// Write to a specific pane by ID (not just focused pane)
+write_chars_to_pane_id(chars: &str, pane_id: PaneId)
+write_to_pane_id(bytes: Vec<u8>, pane_id: PaneId)
+```
+
+**Available in newer zellij (not in 0.43.1):**
+```rust
+// Read pane contents directly
+get_pane_scrollback(pane_id: PaneId, get_full: bool) -> Result<PaneContents, String>
+```
+
+**CLI limitations:**
+```bash
+zellij action write-chars "text"     # focused pane only, no --pane-id flag
+zellij action dump-screen /path      # focused pane only, no --pane-id flag
+```
+
+### Architecture Decision: Plugin vs Fork Zellij
+
+**Option A: Extend zjpane plugin (current approach)**
+```
+MCP Server → zellij pipe "zjpane::write::ID::text" → plugin → write_chars_to_pane_id()
+```
+- Pro: Works with stock zellij, no fork needed
+- Con: Extra hop, plugin must be running
+
+**Option B: Fork zellij, add --pane-id flags**
+```
+MCP Server → zellij action write-chars --pane-id 5 "text"
+```
+- Pro: Direct, clean, one less moving part
+- Con: Maintain a zellij fork, PRs might not merge upstream
+
+**Decision: TBD** - Plugin approach works today; fork is cleaner long-term.
+
+### Proposed MCP Server Tools
+
+```typescript
+// Pane management
+list_panes()                         → [{id, name, title}]
+focus_pane(name_or_id)               → focuses pane
+spawn_agent(name, command)           → new Claude in visible pane
+
+// I/O to specific panes
+write_to_pane(name_or_id, text)      → sends keystrokes
+read_pane(name_or_id)                → gets terminal contents (needs workaround or newer zellij)
+
+// Agent messaging (stateful in MCP server)
+send_message(to_agent, message)      → queues message
+receive_messages()                   → gets messages for this agent
+
+// Visible subprocess execution
+run_visible(command, pane_name)      → {pane_id, output_file}
+read_output(pane_name)               → gets captured output
+```
+
+### Next Steps
+1. Add `zjpane::write::ID::TEXT` command using `write_chars_to_pane_id`
+2. For reading: workaround (focus → dump-screen → read file) OR upgrade zellij
+3. Build MCP server (`zellij-swarm-mcp`) that orchestrates everything
+4. Decide later: continue with plugin or fork zellij for cleaner CLI
+
 ## Useful References
 - zellij plugin pipes: https://zellij.dev/documentation/plugin-pipes
 - cli_pipe_output API: https://docs.rs/zellij-tile/latest/zellij_tile/shim/fn.cli_pipe_output.html
-- PipeMessage struct: https://docs.rs/zellij-tile/latest/zellij_tile/prelude/struct.PipeMessage.html
-- zjstatus plugin (may have pipe examples): https://github.com/dj95/zjstatus
+- PipeMessage struct: https://docs.rs/zellij-tile/latest/zellij_tile/prelude/struct.PaneContents.html
+- zellij source (cloned): ~/repos/zellij
+- zjstatus plugin (pipe examples): https://github.com/dj95/zjstatus
