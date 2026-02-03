@@ -24,6 +24,8 @@ struct State {
     has_permission_granted: bool,
     commands: Vec<UserCommand>,
     mode: Mode,
+    // For deferred pipe output (list command)
+    pending_list_pipe_id: Option<String>,
 }
 
 register_plugin!(State);
@@ -193,6 +195,7 @@ impl State {
     fn parse_pipe(&mut self, pipe_message: &PipeMessage) -> bool {
         let should_render = false;
 
+        // The payload contains the message when using: zellij pipe "zjpane::cmd"
         let input = match &pipe_message.payload {
             Some(payload) => payload,
             None => return false,
@@ -215,13 +218,11 @@ impl State {
 
         match action {
             "list" => {
-                // Return pane list as JSON to CLI
+                // Defer output - block now, output on timer (like strider filepicker)
                 if let PipeSource::Cli(pipe_id) = &pipe_message.source {
-                    let panes_json: Vec<String> = self.panes.iter().map(|p| {
-                        format!("{{\"id\":{},\"title\":\"{}\"}}", p.id, p.title.replace("\"", "\\\""))
-                    }).collect();
-                    let output = format!("[{}]", panes_json.join(","));
-                    cli_pipe_output(pipe_id, &output);
+                    block_cli_pipe_input(pipe_id);
+                    self.pending_list_pipe_id = Some(pipe_id.clone());
+                    set_timeout(0.1); // Trigger timer event
                 }
             }
             "focus_at" => {
@@ -306,6 +307,7 @@ impl ZellijPlugin for State {
             PermissionType::ChangeApplicationState,
             PermissionType::OpenTerminalsOrPlugins,
             PermissionType::RunCommands,
+            PermissionType::ReadCliPipes,
         ]);
 
         subscribe(&[
@@ -314,18 +316,31 @@ impl ZellijPlugin for State {
             EventType::Key,
             EventType::PermissionRequestResult,
             EventType::RunCommandResult,
+            EventType::Timer,
         ]);
     }
 
     #[tracing::instrument(skip_all, fields(event_type))]
     fn update(&mut self, event: Event) -> bool {
-        if let Event::PermissionRequestResult(status) = event {
+        if let Event::PermissionRequestResult(status) = &event {
             tracing::Span::current().record("event_type", "Event::PermissionRequestResult");
             tracing::debug!(status = ?status);
 
             match status {
                 PermissionStatus::Granted => self.has_permission_granted = true,
                 PermissionStatus::Denied => self.has_permission_granted = false,
+            }
+        }
+
+        // Handle deferred list output
+        if let Event::Timer(_) = &event {
+            if let Some(pipe_id) = self.pending_list_pipe_id.take() {
+                let panes_json: Vec<String> = self.panes.iter().map(|p| {
+                    format!("{{\"id\":{},\"title\":\"{}\"}}", p.id, p.title.replace("\"", "\\\""))
+                }).collect();
+                let output = format!("[{}]", panes_json.join(","));
+                cli_pipe_output(&pipe_id, &output);
+                unblock_cli_pipe_input(&pipe_id);
             }
         }
 
