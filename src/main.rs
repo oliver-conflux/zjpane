@@ -190,12 +190,17 @@ impl State {
         should_render
     }
 
-    fn parse_pipe(&mut self, input: &str) -> bool {
+    fn parse_pipe(&mut self, pipe_message: &PipeMessage) -> bool {
         let should_render = false;
+
+        let input = match &pipe_message.payload {
+            Some(payload) => payload,
+            None => return false,
+        };
 
         let parts = input.split("::").collect::<Vec<&str>>();
 
-        if parts.len() < 3 {
+        if parts.len() < 2 {
             return false;
         }
 
@@ -204,11 +209,21 @@ impl State {
         }
 
         let action = parts[1];
-        let payload = parts[2];
+        let payload = if parts.len() > 2 { parts[2] } else { "" };
         tracing::debug!(action = ?action);
         tracing::debug!(payload = ?payload);
 
         match action {
+            "list" => {
+                // Return pane list as JSON to CLI
+                if let PipeSource::Cli(pipe_id) = &pipe_message.source {
+                    let panes_json: Vec<String> = self.panes.iter().map(|p| {
+                        format!("{{\"id\":{},\"title\":\"{}\"}}", p.id, p.title.replace("\"", "\\\""))
+                    }).collect();
+                    let output = format!("[{}]", panes_json.join(","));
+                    cli_pipe_output(pipe_id, &output);
+                }
+            }
             "focus_at" => {
                 if let Ok(Some(pane)) = payload.parse::<usize>().map(|index| self.panes.get(index))
                 {
@@ -332,9 +347,7 @@ impl ZellijPlugin for State {
 
         match pipe_message.source {
             PipeSource::Cli(_) | PipeSource::Plugin(_) | PipeSource::Keybind => {
-                if let Some(payload) = pipe_message.payload {
-                    should_render = self.parse_pipe(&payload);
-                }
+                should_render = self.parse_pipe(&pipe_message);
             }
         }
 
